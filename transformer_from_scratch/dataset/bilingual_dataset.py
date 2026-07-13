@@ -25,12 +25,12 @@ SOURCE_TOKENIZER_FILENAME = "source_tokenizer.json"
 TARGET_TOKENIZER_FILENAME = "target_tokenizer.json"
 
 
-class BilingualDataset:
-    """Download and prepare a bilingual corpus for training and validation.
+class BilingualDatasetBuilder:
+    """Build the datasets and tokenizers required for bilingual translation.
 
-    The complete corpus is used to train one tokenizer per language. In a new
-    run, both tokenizers are saved as artifacts. When resuming, the original
-    tokenizers are loaded so their token IDs remain unchanged.
+    The class downloads the corpus, builds or loads one tokenizer per language,
+    creates reproducible training and validation splits, and wraps each split
+    in the dataset consumed by the model.
 
     Args:
         dataset_name: Hugging Face dataset identifier.
@@ -64,36 +64,40 @@ class BilingualDataset:
         self.target_language = target_language
         self.language_pair = f"{source_language}-{target_language}"
         self.sequence_length = sequence_length
-        self.train_fraction, self.validation_fraction = self._validate_fractions(train_fraction, validation_fraction)
+
+        self._validate_fractions(train_fraction, validation_fraction)
+        self.train_fraction = train_fraction
+        self.validation_fraction = validation_fraction
 
         self.artifacts_dir = Path(artifacts_dir)
         self.resume = resume
         self.random_state = random_state
         self.tokenizer_min_frequency = tokenizer_min_frequency
 
-    def _validate_fractions(train_fraction:float, val_fraction:float):
-        """Validate the fractions and create reproducible train/validation splits."""
-        if not 0 < self.train_fraction < 1:
+    @staticmethod
+    def _validate_fractions(
+        train_fraction: float,
+        validation_fraction: float,
+    ) -> None:
+        """Validate the train and validation fractions."""
+        if not 0 < train_fraction < 1:
             raise ValueError("train_fraction must be between 0 and 1.")
 
-        if not 0 < self.validation_fraction < 1:
+        if not 0 < validation_fraction < 1:
             raise ValueError("validation_fraction must be between 0 and 1.")
 
-        if not isclose(self.train_fraction + self.validation_fraction, 1.0):
+        if not isclose(train_fraction + validation_fraction, 1.0):
             raise ValueError(
                 "train_fraction and validation_fraction must sum to 1."
             )
-    
-        return train_fraction, val_fraction
 
-
-    def _build_tokenizers(self,raw_dataset):
-
-
-
-
+    def _build_tokenizers(
+        self,
+        raw_dataset: Sequence[TranslationExample],
+    ) -> tuple[Tokenizer, Tokenizer]:
+        """Build new tokenizers or load those from a resumed run."""
         if self.resume:
-            self.source_tokenizer, self.target_tokenizer = self._load_tokenizers()
+            source_tokenizer, target_tokenizer = self._load_tokenizers()
         else:
             source_tokenizer = self._build_tokenizer(
                 raw_dataset,
@@ -103,34 +107,61 @@ class BilingualDataset:
                 raw_dataset,
                 self.target_language,
             )
-            self._save_tokenizers()
+            self._save_tokenizers(source_tokenizer, target_tokenizer)
 
         return source_tokenizer, target_tokenizer
-
-
 
     def _build_tokenizer(
         self,
         dataset: Sequence[TranslationExample],
         language: str,
     ) -> Tokenizer:
-        """Train a word-level tokenizer for one language."""
+        """Train a word-level tokenizer for one language.
+
+        ``WordLevel`` creates a vocabulary in which every complete word has a
+        numeric ID. Words excluded from that vocabulary are represented by
+        ``[UNK]`` instead of causing the encoding process to fail.
+
+        ``Whitespace`` defines how each sentence is divided into candidate
+        words before their frequencies are counted. ``WordLevelTrainer`` then
+        builds the vocabulary, always includes the special tokens, and removes
+        words whose frequency is below ``tokenizer_min_frequency``.
+
+        Args:
+            dataset: Translation examples used to learn the vocabulary.
+            language: Language key extracted from each translation example.
+
+        Returns:
+            The trained tokenizer for the requested language.
+        """
+        # WordLevel assigns one vocabulary entry to each complete word. The
+        # unknown token is the fallback for words absent from that vocabulary.
         tokenizer = Tokenizer(WordLevel(unk_token=UNK_TOKEN))
+
+        # The pre-tokenizer runs before both training and encoding, ensuring
+        # that sentences are split into words using the same rule each time.
         tokenizer.pre_tokenizer = Whitespace()
 
+        # The trainer decides which words enter the final vocabulary. Special
+        # tokens are inserted regardless of frequency; ordinary words must
+        # reach the configured minimum frequency.
         trainer = WordLevelTrainer(
             special_tokens=SPECIAL_TOKENS,
             min_frequency=self.tokenizer_min_frequency,
         )
+
+        # The iterator yields one sentence at a time, so the tokenizer can
+        # learn the vocabulary without first copying every sentence to a list.
         tokenizer.train_from_iterator(
-            self._sentences(dataset, language),
+            self._get_sentences(dataset, language),
             trainer,
         )
 
+        # At this point the vocabulary and its token-to-ID mapping are fixed.
         return tokenizer
 
     @staticmethod
-    def get_sentences(
+    def _get_sentences(
         dataset: Sequence[TranslationExample],
         language: str,
     ) -> Iterator[str]:
@@ -138,13 +169,17 @@ class BilingualDataset:
         for example in dataset:
             yield example["translation"][language]
 
-    def _save_tokenizers(self) -> None:
+    def _save_tokenizers(
+        self,
+        source_tokenizer: Tokenizer,
+        target_tokenizer: Tokenizer,
+    ) -> None:
         """Save both tokenizers in the run artifact directory."""
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
-        self.source_tokenizer.save(
+        source_tokenizer.save(
             str(self.artifacts_dir / SOURCE_TOKENIZER_FILENAME)
         )
-        self.target_tokenizer.save(
+        target_tokenizer.save(
             str(self.artifacts_dir / TARGET_TOKENIZER_FILENAME)
         )
 
@@ -168,49 +203,53 @@ class BilingualDataset:
         self,
         dataset: Sequence[TranslationExample],
     ) -> tuple[Sequence[TranslationExample], Sequence[TranslationExample]]:
-       
-
+        """Create reproducible, non-empty training and validation splits."""
         train_size = int(len(dataset) * self.train_fraction)
         validation_size = len(dataset) - train_size
 
         if train_size == 0 or validation_size == 0:
             raise ValueError("Train and validation splits must be non-empty.")
 
-        return random_split(
+        train_samples, validation_samples = random_split(
             dataset,
             [train_size, validation_size],
             generator=torch.Generator().manual_seed(self.random_state),
         )
 
+        return train_samples, validation_samples
+
     def build_datasets(
         self,
-        examples: Sequence[TranslationExample],
-    ) -> BilingualDataset:
-        """Wrap a raw split with the tokenization dataset."""
-
-        # Download Dataset frpom HuggingFace
-        dataset_raw = load_dataset(self.dataset_name, self.language_pair, split="train")
-
-        # Buid Tokenizers
-        source_tokenizer, target_tokenizer = self.build_tokenizers(dataset = dataset_raw)
-
-        train_samples, val_samples = self._split_dataset(dataset)
-
-
-        train_dataset =  BilingualDataset(
-            dataset=train_samples,
-            source_tokenizer=self.source_tokenizer,
-            target_tokenizer=self.target_tokenizer,
-            source_language=self.source_language,
-            target_language=self.target_language,
-            sequence_length=self.sequence_length,
+    ) -> tuple[BilingualDataset, BilingualDataset]:
+        """Download the corpus and return its prepared train and validation sets."""
+        # OPUS Books exposes one upstream split. We create our own train and
+        # validation partitions from it below.
+        raw_dataset = load_dataset(
+            self.dataset_name,
+            self.language_pair,
+            split="train",
         )
 
-        val_dataset =  BilingualDataset(
-            dataset=val_samples,
+        # Tokenizers use the complete vocabulary before the samples are split.
+        source_tokenizer, target_tokenizer = self._build_tokenizers(raw_dataset)
+        train_samples, validation_samples = self._split_dataset(raw_dataset)
+
+        train_dataset = BilingualDataset(
+            dataset=train_samples,
             source_tokenizer=source_tokenizer,
             target_tokenizer=target_tokenizer,
             source_language=self.source_language,
             target_language=self.target_language,
             sequence_length=self.sequence_length,
         )
+
+        validation_dataset = BilingualDataset(
+            dataset=validation_samples,
+            source_tokenizer=source_tokenizer,
+            target_tokenizer=target_tokenizer,
+            source_language=self.source_language,
+            target_language=self.target_language,
+            sequence_length=self.sequence_length,
+        )
+
+        return train_dataset, validation_dataset

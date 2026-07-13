@@ -4,7 +4,7 @@ import torch
 from tokenizers import Tokenizer
 from torch.utils.data import DataLoader, Dataset
 
-
+from bilingual_dataset import SOS_TOKEN, EOS_TOKEN, PAD_TOKEN
 
 
 class TranslationExample(TypedDict):
