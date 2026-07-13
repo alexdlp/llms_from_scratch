@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -8,14 +9,14 @@ from dotenv import load_dotenv
 from torch.utils.data import DataLoader
 import mlflow
 from omegaconf import OmegaConf
-from itp_fabadII.utils import ConfigNamespace, flatten_dict
-from itp_fabadII.logger import logger
 from tqdm import tqdm
 import sys
 from collections.abc import Mapping, Sequence
 
-from itp_fabadII.callbacks import Callback
-from itp_fabadII.utils.color_utils import bold_green, orange
+from ..callbacks import Callback
+from ..logger import logger
+from ..utils.color_utils import bold_green, orange
+from ..utils.config_utils import ConfigNamespace, flatten_dict
 
 class BasePipeline(ABC):
     """
@@ -50,7 +51,7 @@ class BasePipeline(ABC):
 
     def _inject_config(self, cfg):
         """
-        Injects Hydra configuration as nested ConfigNamespace objects into the pipeline.
+        Injects configuration as nested ConfigNamespace objects into the pipeline.
 
         Each top-level section (data, model, optimizer, loss, training, etc.)
         becomes a class attribute, preserving its internal hierarchical structure.
@@ -260,8 +261,6 @@ class BasePipeline(ABC):
     # ---------- orchestration ----------
     def setup(self) -> None:
         """Initializes model, optimizer, dataloaders, and optionally resumes state."""
-
-        self.fabric.launch()
         
         self.train_loader, self.val_loader = self.load_data()
         self.train_loader, self.val_loader = self.fabric.setup_dataloaders(
@@ -321,11 +320,34 @@ class BasePipeline(ABC):
             prefixed[name] = value
         return prefixed
 
+    def _sync_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
+        return {
+            name: self.fabric.all_reduce(
+                torch.tensor(value, device=self.fabric.device),
+                reduce_op="mean",
+            ).item()
+            for name, value in metrics.items()
+        }
+
+    def _sync_stop_training(self) -> bool:
+        return bool(
+            self.fabric.all_reduce(
+                torch.tensor(
+                    int(self.stop_training),
+                    device=self.fabric.device,
+                ),
+                reduce_op="max",
+            ).item()
+        )
+
 
     def log_metrics(self, metrics: dict[str, float], step: int | None = None) -> None:
         """
         Logs metrics to MLflow. Assumes metrics are already prefixed.
         """
+        if not self.fabric.is_global_zero:
+            return
+
         if not mlflow.active_run():
             logger.warning("Attempted to log metrics outside an active MLflow run.")
             return
@@ -359,6 +381,9 @@ class BasePipeline(ABC):
         return batch
     
     def _run_callbacks(self, hook_name: str, **kwargs: Any) -> None:
+        if not self.fabric.is_global_zero:
+            return
+
         for cb in self.callbacks:
             hook = getattr(cb, hook_name, None)
             if hook is not None:
@@ -384,6 +409,7 @@ class BasePipeline(ABC):
 
         # tqdm solo en rank 0
         train_iter = tqdm(self.train_loader, desc=f"[Train Epoch {epoch+1}]",
+        disable=not self.fabric.is_global_zero,
         dynamic_ncols=True,     # adapta el ancho automáticamente
         position=0,             # mantiene la barra en una sola línea
         leave=True,             # deja la barra final al acabar
@@ -419,6 +445,7 @@ class BasePipeline(ABC):
                 train_iter.set_postfix({"loss": f"{val:.3f}"})
 
         metrics_mean = {k: total / (i + 1) for k, total in metrics_accum.items()}
+        metrics_mean = self._sync_metrics(metrics_mean)
         metrics_mean = self._apply_prefix(metrics=metrics_mean, prefix="train")
         
         self.log_metrics(metrics_mean, step=epoch)
@@ -432,6 +459,7 @@ class BasePipeline(ABC):
 
 
         val_iter = tqdm(self.val_loader, desc=f"[Val   Epoch {epoch+1}]",
+            disable=not self.fabric.is_global_zero,
             dynamic_ncols=True,     # adapta el ancho automáticamente
             position=1,             # mantiene la barra en una sola línea
             leave=True,             # deja la barra final al acabar
@@ -461,6 +489,7 @@ class BasePipeline(ABC):
                     val_iter.set_postfix({"val_loss": f"{val:.3f}"})
 
         metrics_mean = {k: total / (i + 1) for k, total in metrics_accum.items()}
+        metrics_mean = self._sync_metrics(metrics_mean)
         metrics_mean = self._apply_prefix(metrics=metrics_mean, prefix="val")
         
         self.log_metrics(metrics_mean, step=epoch)
@@ -477,9 +506,12 @@ class BasePipeline(ABC):
         """
         epochs: int = int(self.cfg.training.epochs)
 
-        # ------------------ RESUME OR NEW RUN ------------------
-        if self.resuming:
+        self.fabric.launch()
 
+        # ------------------ RESUME OR NEW RUN ------------------
+        if not self.fabric.is_global_zero:
+            mlflow_context = nullcontext()
+        elif self.resuming:
             logger.info(f"Resuming MLflow run: {self.resume_run_id}")
             mlflow_context = mlflow.start_run(run_id=self.resume_run_id)
         else:
@@ -488,9 +520,14 @@ class BasePipeline(ABC):
 
         # ------------------ MLflow CONTEXT ------------------
         with mlflow_context:
-            self.run_artifacts_dir = Path(self._get_run_artifacst_dir())
-            self.run_artifacts_dir.mkdir(parents=True, exist_ok=True)
+            if self.fabric.is_global_zero:
+                self.run_artifacts_dir = Path(self._get_run_artifacst_dir())
+                self.run_artifacts_dir.mkdir(parents=True, exist_ok=True)
 
+            self.run_artifacts_dir = self.fabric.broadcast(
+                self.run_artifacts_dir,
+                src=0,
+            )
             self.setup()
 
             start_epoch = getattr(self, "last_epoch", 0) + 1 if self.resuming else 0
@@ -501,8 +538,9 @@ class BasePipeline(ABC):
                 epochs = start_epoch + 1
                 logger.info(orange("Fast dev run enabled. Running for 1 epoch"))
 
-            # Log config once per run
-            self._log_config_to_mlflow()
+            if self.fabric.is_global_zero:
+                # Log config once per run
+                self._log_config_to_mlflow()
 
             # Callbacks: inicio de fit
             self._run_callbacks("on_fit_start")
@@ -522,8 +560,9 @@ class BasePipeline(ABC):
                 # Callbacks de fin de epoch
                 self._run_callbacks("on_epoch_end", epoch=epoch, logs=all_metrics)
 
+                self.stop_training = self._sync_stop_training()
                 if self.stop_training:
-                    break;
+                    break
 
                 # Keep track of the latest epoch
                 self.last_epoch = epoch + 1
