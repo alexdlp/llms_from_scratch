@@ -10,16 +10,12 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import WordLevelTrainer
 from torch.utils.data import random_split
 
-from .bilingual_dataloader import (
-    BilingualDataset,
+from .bilingual_common import (
+    SPECIAL_TOKENS,
     TranslationExample,
+    UNK_TOKEN,
 )
-
-SOS_TOKEN = "[SOS]"
-EOS_TOKEN = "[EOS]"
-PAD_TOKEN = "[PAD]"
-UNK_TOKEN = "[UNK]"
-SPECIAL_TOKENS = [UNK_TOKEN, PAD_TOKEN, SOS_TOKEN, EOS_TOKEN]
+from .bilingual_dataloader import BilingualDataset
 
 SOURCE_TOKENIZER_FILENAME = "source_tokenizer.json"
 TARGET_TOKENIZER_FILENAME = "target_tokenizer.json"
@@ -218,6 +214,59 @@ class BilingualDatasetBuilder:
 
         return train_samples, validation_samples
 
+    def _filter_long_examples(
+        self,
+        dataset: Sequence[TranslationExample],
+        source_tokenizer: Tokenizer,
+        target_tokenizer: Tokenizer,
+    ) -> list[TranslationExample]:
+        """Remove examples that cannot fit in the configured sequence length.
+
+        Filtering happens before the train/validation split so neither dataset
+        can fail halfway through an epoch because of an oversized sentence.
+        The source sequence reserves two positions for ``[SOS]`` and ``[EOS]``.
+        Each shifted target sequence reserves one position: ``[SOS]`` in the
+        decoder input or ``[EOS]`` in the expected output.
+
+        The tokenizers must already exist because sentence length is measured
+        after tokenization, not by characters or whitespace-separated words.
+
+        Args:
+            dataset: Raw bilingual examples to inspect.
+            source_tokenizer: Tokenizer used to measure source sequences.
+            target_tokenizer: Tokenizer used to measure target sequences.
+
+        Returns:
+            Examples whose source and target sequences both fit.
+
+        Raises:
+            ValueError: If every example is too long.
+        """
+        maximum_source_tokens = self.sequence_length - 2
+        maximum_target_tokens = self.sequence_length - 1
+        filtered_examples: list[TranslationExample] = []
+
+        for example in dataset:
+            source_text = example["translation"][self.source_language]
+            target_text = example["translation"][self.target_language]
+
+            source_token_count = len(source_tokenizer.encode(source_text).ids)
+            target_token_count = len(target_tokenizer.encode(target_text).ids)
+
+            source_fits = source_token_count <= maximum_source_tokens
+            target_fits = target_token_count <= maximum_target_tokens
+
+            if source_fits and target_fits:
+                filtered_examples.append(example)
+
+        if not filtered_examples:
+            raise ValueError(
+                "No translation examples fit within the configured "
+                f"sequence length of {self.sequence_length}."
+            )
+
+        return filtered_examples
+
     def build_datasets(
         self,
     ) -> tuple[BilingualDataset, BilingualDataset]:
@@ -230,9 +279,23 @@ class BilingualDatasetBuilder:
             split="train",
         )
 
-        # Tokenizers use the complete vocabulary before the samples are split.
+        # Build the vocabularies from the complete corpus. When resuming, this
+        # step loads the exact tokenizers associated with the checkpoint.
         source_tokenizer, target_tokenizer = self._build_tokenizers(raw_dataset)
-        train_samples, validation_samples = self._split_dataset(raw_dataset)
+
+        # Remove oversized examples before creating the splits. This prevents
+        # an individual sample from interrupting an epoch inside __getitem__.
+        filtered_dataset = self._filter_long_examples(
+            raw_dataset,
+            source_tokenizer,
+            target_tokenizer,
+        )
+
+        # Split only after filtering so both partitions contain exclusively
+        # valid examples and preserve the configured proportions.
+        train_samples, validation_samples = self._split_dataset(
+            filtered_dataset
+        )
 
         train_dataset = BilingualDataset(
             dataset=train_samples,

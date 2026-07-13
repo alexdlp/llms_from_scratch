@@ -1,24 +1,16 @@
-from typing import Sequence, TypedDict
+from typing import Sequence
 
 import torch
 from tokenizers import Tokenizer
 from torch.utils.data import DataLoader, Dataset
 
-from bilingual_dataset import SOS_TOKEN, EOS_TOKEN, PAD_TOKEN
-
-
-class TranslationExample(TypedDict):
-    translation: dict[str, str]
-
-
-class BilingualSample(TypedDict):
-    source_token_ids: torch.Tensor
-    target_input_token_ids: torch.Tensor
-    source_padding_mask: torch.Tensor
-    target_attention_mask: torch.Tensor
-    target_output_token_ids: torch.Tensor
-    source_text: str
-    target_text: str
+from .bilingual_common import (
+    EOS_TOKEN,
+    PAD_TOKEN,
+    SOS_TOKEN,
+    BilingualSample,
+    TranslationExample,
+)
 
 
 class BilingualDataset(Dataset[BilingualSample]):
@@ -66,6 +58,13 @@ class BilingualDataset(Dataset[BilingualSample]):
         return len(self.dataset)
 
     def __getitem__(self, index: int) -> BilingualSample:
+        """Tokenize one translation pair and prepare its model inputs.
+
+        The encoder receives a source sequence surrounded by ``[SOS]`` and
+        ``[EOS]``. The decoder receives the target sequence shifted by one
+        position, allowing it to learn to predict the next token. Padding and
+        causal masks mark which positions may participate in attention.
+        """
         source_target_pair = self.dataset[index]
         source_text = source_target_pair["translation"][self.source_language]
         target_text = source_target_pair["translation"][self.target_language]
@@ -73,48 +72,20 @@ class BilingualDataset(Dataset[BilingualSample]):
         source_text_token_ids = self.source_tokenizer.encode(source_text).ids
         target_text_token_ids = self.target_tokenizer.encode(target_text).ids
 
-        source_padding_count = self.sequence_length - len(source_text_token_ids) - 2
-        target_padding_count = self.sequence_length - len(target_text_token_ids) - 1
+        source_token_ids = self._build_source_sequence(source_text_token_ids)
+        
+        (
+            target_input_token_ids,
+            target_output_token_ids,
+        ) = self._build_target_sequences(target_text_token_ids)
 
-        if source_padding_count < 0 or target_padding_count < 0:
-            raise ValueError("Sentence is too long")
-
-        source_token_ids = torch.tensor(
-            [
-                self.source_sos_id,
-                *source_text_token_ids,
-                self.source_eos_id,
-                *([self.source_pad_id] * source_padding_count),
-            ],
-            dtype=torch.long,
+        (
+            source_padding_mask,
+            target_attention_mask,
+        ) = self._build_attention_masks(
+            source_token_ids,
+            target_input_token_ids,
         )
-
-        # Shifting the target by one token creates the decoder inputs and outputs.
-        target_input_token_ids = torch.tensor(
-            [
-                self.target_sos_id,
-                *target_text_token_ids,
-                *([self.target_pad_id] * target_padding_count),
-            ],
-            dtype=torch.long,
-        )
-        target_output_token_ids = torch.tensor(
-            [
-                *target_text_token_ids,
-                self.target_eos_id,
-                *([self.target_pad_id] * target_padding_count),
-            ],
-            dtype=torch.long,
-        )
-
-        assert source_token_ids.size(0) == self.sequence_length
-        assert target_input_token_ids.size(0) == self.sequence_length
-        assert target_output_token_ids.size(0) == self.sequence_length
-
-        source_padding_mask = (source_token_ids != self.source_pad_id).unsqueeze(0)
-        target_attention_mask = (
-            target_input_token_ids != self.target_pad_id
-        ).unsqueeze(0) & causal_mask(target_input_token_ids.size(0))
 
         return {
             "source_token_ids": source_token_ids,
@@ -125,6 +96,120 @@ class BilingualDataset(Dataset[BilingualSample]):
             "source_text": source_text,
             "target_text": target_text,
         }
+
+    def _build_source_sequence(
+        self,
+        source_text_token_ids: list[int],
+    ) -> torch.Tensor:
+        """Create the fixed-length token sequence consumed by the encoder.
+
+        The source sequence has the form ``[SOS] + tokens + [EOS] + padding``.
+        Two positions are therefore reserved for the boundary tokens. The
+        remaining positions are filled with ``[PAD]`` so all examples have the
+        same length and can be stacked into a batch.
+
+        The builder should already have removed oversized examples. The length
+        check remains here as a defensive guard for datasets created elsewhere.
+        """
+        padding_count = self.sequence_length - len(source_text_token_ids) - 2
+
+        if padding_count < 0:
+            raise ValueError(
+                "Source sentence exceeds the configured sequence length: "
+                f"{len(source_text_token_ids)} tokens, maximum "
+                f"{self.sequence_length - 2}."
+            )
+
+        # The starred expressions unpack the token and padding lists into one
+        # flat list instead of creating nested lists inside the tensor.
+        return torch.tensor(
+            [
+                self.source_sos_id,
+                *source_text_token_ids,
+                self.source_eos_id,
+                *([self.source_pad_id] * padding_count),
+            ],
+            dtype=torch.long,
+        )
+
+    def _build_target_sequences(
+        self,
+        target_text_token_ids: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Create the decoder input and its expected next-token output.
+
+        The two sequences contain the same text shifted by one position::
+
+            input:  [SOS], token_1, token_2, ..., [PAD]
+            output: token_1, token_2, ..., [EOS], [PAD]
+
+        At every position, the output is the token that the decoder should
+        predict from the preceding input tokens. Each sequence reserves one
+        position for either ``[SOS]`` or ``[EOS]`` and uses identical padding
+        so both have ``sequence_length`` elements.
+        """
+        padding_count = self.sequence_length - len(target_text_token_ids) - 1
+
+        if padding_count < 0:
+            raise ValueError(
+                "Target sentence exceeds the configured sequence length: "
+                f"{len(target_text_token_ids)} tokens, maximum "
+                f"{self.sequence_length - 1}."
+            )
+
+        # As in the source sequence, ``*`` unpacks each list into a flat list
+        # of integer IDs suitable for constructing a one-dimensional tensor.
+        target_input_token_ids = torch.tensor(
+            [
+                self.target_sos_id,
+                *target_text_token_ids,
+                *([self.target_pad_id] * padding_count),
+            ],
+            dtype=torch.long,
+        )
+        target_output_token_ids = torch.tensor(
+            [
+                *target_text_token_ids,
+                self.target_eos_id,
+                *([self.target_pad_id] * padding_count),
+            ],
+            dtype=torch.long,
+        )
+
+        return target_input_token_ids, target_output_token_ids
+
+    def _build_attention_masks(
+        self,
+        source_token_ids: torch.Tensor,
+        target_input_token_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build the padding and causal masks used by attention.
+
+        Comparing token IDs with the padding ID creates boolean masks where
+        ``True`` represents real content and ``False`` represents ``[PAD]``.
+        ``unsqueeze(0)`` adds the leading dimension expected by attention and
+        later allows the mask to broadcast across batches and attention heads.
+
+        The decoder mask additionally combines its padding mask with a causal
+        lower-triangular mask. Consequently, a decoder position may attend only
+        to non-padding tokens at its current or an earlier position, never to a
+        future target token. When both masks are combined, the padding mask of
+        shape ``(1, sequence_length)`` is broadcast over every query position,
+        producing a final mask of shape ``(1, sequence_length, sequence_length)``.
+        """
+        source_padding_mask = (
+            source_token_ids != self.source_pad_id
+        ).unsqueeze(0)
+
+        target_padding_mask = (
+            target_input_token_ids != self.target_pad_id
+        ).unsqueeze(0)
+        
+        target_attention_mask = target_padding_mask & causal_mask(
+            target_input_token_ids.size(0)
+        )
+
+        return source_padding_mask, target_attention_mask
 
 
 class BilingualDataLoader(DataLoader[BilingualSample]):
