@@ -199,7 +199,7 @@ class BilingualDataset(Dataset[BilingualSample]):
         """
         source_padding_mask = (
             source_token_ids != self.source_pad_id
-        ).unsqueeze(0)
+        ).unsqueeze(0).unsqueeze(0)
 
         target_padding_mask = (
             target_input_token_ids != self.target_pad_id
