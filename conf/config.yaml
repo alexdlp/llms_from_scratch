@@ -1,0 +1,63 @@
+defaults:
+  - model: transformer
+  - optimizer: adam
+  - loss: cross_entropy
+  - _self_
+
+mlflow:
+  tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,http://127.0.0.1:5000}
+  artifacts:
+    dir: ${oc.env:PROJECT_ROOT,.}/artifacts
+
+data:
+  dataset:
+    dataset_name: opus_books
+    source_language: en
+    target_language: it
+    sequence_length: 350
+    train_fraction: 0.8
+    validation_fraction: 0.2
+    random_state: ${training.seed}
+
+  train:
+    batch_size: ${training.batch_size}
+    shuffle: true
+    num_workers: ${training.num_workers}
+    pin_memory: ${training.pin_memory}
+    persistent_workers: ${training.persistent_workers}
+    prefetch_factor: ${training.prefetch_factor}
+
+  val:
+    batch_size: ${training.batch_size}
+    shuffle: false
+    num_workers: ${training.num_workers}
+    pin_memory: ${training.pin_memory}
+    persistent_workers: ${training.persistent_workers}
+    prefetch_factor: ${training.prefetch_factor}
+
+
+training:
+  epochs: 30
+  batch_size: 8
+  seed: 42
+  device: mps
+  precision: float32
+  num_workers: 4
+  pin_memory: false
+  persistent_workers: false
+  prefetch_factor: 1
+
+callbacks:
+
+  early_stopping:
+    patience: 10 #200 # 30-50 para el latent
+    monitor: val_loss
+    mode: min
+    min_delta: 1e-6
+    start_from_epoch: 30 #30 # 100
+    
+  model_checkpoint:
+    monitor: val_loss
+    mode: min
+    min_delta: 1e-3
+    start_from_epoch: 0 #30 # 100

@@ -1,0 +1,14 @@
+model:
+
+  name: transformer
+
+  params:
+    model_dimension: 512
+    num_layers: 6
+    num_attention_heads: 8
+    dropout: 0.1
+    feed_forward_dimension: 2048
+  
+  experiment:
+    name: transformer
+    run_name: ${model.name}_${data.source_language}_${data.target_language}_${now:%H%M%S}
