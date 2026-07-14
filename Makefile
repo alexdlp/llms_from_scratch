@@ -12,7 +12,7 @@ run_mlflow:
 	./tools/run_mlflow.sh
 
 stop_mlflow:
-	tmux kill-session -t mlflow_ui || echo "No mlflow_ui session found"
+	./tools/stop_mlflow.sh
 
 status_mlflow:
 	tmux has-session -t mlflow_ui && echo "MLflow UI is running." || echo "MLflow UI \
@@ -35,4 +35,3 @@ kill-port:
 
 %:
 	@:
-
