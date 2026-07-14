@@ -185,8 +185,9 @@ class ModelCheckpoint(MetricCallback):
         """
         
         if mlflow.active_run():
+            model = getattr(pipeline.model, "module", pipeline.model)
             mlflow.pytorch.log_model(
-                pipeline.model,
+                model,
                 artifact_path="best_model"
             )
 
