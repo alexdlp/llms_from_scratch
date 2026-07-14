@@ -22,11 +22,5 @@ def create_pipeline(cfg):
 
     return cls(cfg)
 
-import pkgutil
-import importlib
-
-for _, module_name, _ in pkgutil.iter_modules(__path__):
-    importlib.import_module(f"{__name__}.{module_name}")
-
-
+from . import pipelines
 from .pipelines.base_pipeline import BasePipeline

@@ -11,4 +11,4 @@ model:
   
   experiment:
     name: transformer
-    run_name: ${model.name}_${data.source_language}_${data.target_language}_${now:%H%M%S}
+    run_name: ${model.name}_${data.dataset.source_language}_${data.dataset.target_language}_${now:%H%M%S}

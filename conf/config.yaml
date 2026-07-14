@@ -11,7 +11,7 @@ mlflow:
 
 data:
   dataset:
-    dataset_name: opus_books
+    dataset_name: Helsinki-NLP/opus_books
     source_language: en
     target_language: it
     sequence_length: 350

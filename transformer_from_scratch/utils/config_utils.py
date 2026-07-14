@@ -92,7 +92,7 @@ def compose_config(
     Returns:
         The composed configuration as an OmegaConf ``DictConfig``.
     """
-    config_dir = config_dir or Path(__file__).resolve().parent.parent / "conf"
+    config_dir = config_dir or Path(__file__).resolve().parents[2] / "conf"
     root_config = OmegaConf.load(config_dir / "config.yaml")
 
     defaults = list(root_config.get("defaults", []))
@@ -191,7 +191,7 @@ def load_environment(args: Optional[argparse.Namespace] = None) -> None:
     Args:
         args (Optional[argparse.Namespace]): Parsed CLI arguments to export.
     """
-    env_path = Path(__file__).resolve().parents[3] / ".env"
+    env_path = Path(__file__).resolve().parents[2] / ".env"
 
     # --- Load .env file ---
     if env_path.is_file():
