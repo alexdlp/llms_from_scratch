@@ -19,7 +19,7 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.seq_len = seq_len
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
 
         # create a matrix of shape (seq_len, d_model)
         pe = torch.zeros(seq_len, d_model)
@@ -33,7 +33,7 @@ class PositionalEncoding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
 
         # apply the cos to the uneven positino
-        pe[:, 1::3] = torch.cos(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
 
         pe = pe.unsqueeze(0) # (1, seq_len, d_model)
 
@@ -41,11 +41,12 @@ class PositionalEncoding(nn.Module):
 
     def forward(self, x):
         x = x + (self.pe[:, :x.shape[1], :]).requires_grad_(False)
+        return self.dropout(x)
 
 class LayerNormalization(nn.Module):
 
     def __init__(self, eps: float = 10**-6) -> None:
-        super()._init__()
+        super().__init__()
         self.eps = eps
         self.alpha = nn.Parameter(torch.ones(1)) # Multiplied
         self.bias = nn.Parameter(torch.zeros(1)) # Added
@@ -97,7 +98,7 @@ class MultiHeadAttetionBlock(nn.Module):
         # (batch, h, seq_len, d_k) --> (Batch, h, seq_len, seq_len)
         attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
 
-        if mask:
+        if mask is not None:
             attention_scores.masked_fill_(mask == 0, -1e9)
 
         # ( batch, h, seq_len, seq_len )
@@ -172,12 +173,12 @@ class Encoder(nn.Module):
     
 
 class DecoderBlock(nn.Module):
-    def __init__(self, self_attention_block: MultiHeadAttetionBlock, cross_attention_block: MultiHeadAttetionBlock, feed_forward_blocl: FeedForwardBlock, dropout: float):
+    def __init__(self, self_attention_block: MultiHeadAttetionBlock, cross_attention_block: MultiHeadAttetionBlock, feed_forward_block: FeedForwardBlock, dropout: float):
         super().__init__()
         self.self_attention_block = self_attention_block
-        self.cross_attention_block = cross_attention_block,
-        self.feed_forward_block = self.feed_forward_block
-        self.residual_connections = nn.Module([ResidualConnection(dropout) for _ in range(3)])
+        self.cross_attention_block = cross_attention_block
+        self.feed_forward_block = feed_forward_block
+        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)])
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x,x,x, tgt_mask))
@@ -211,6 +212,7 @@ class ProjectionLayer(nn.Module):
 class Transformer(nn.Module):
 
     def __init__(self, encoder:Encoder, decoder: Decoder, src_embed: InputEmbeddings, tgt_embed: InputEmbeddings, src_pos: PositionalEncoding, tgt_pos: PositionalEncoding, projection_layer: ProjectionLayer):
+        super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.src_embed = src_embed
@@ -225,7 +227,7 @@ class Transformer(nn.Module):
         return self.encoder(src, src_mask)
     
     def decode(self, encoder_output, src_mask, tgt, tgt_mask):
-        tgt = self.tgt_mask(tgt)
+        tgt = self.tgt_embed(tgt)
         tgt = self.tgt_pos(tgt)
         return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
     

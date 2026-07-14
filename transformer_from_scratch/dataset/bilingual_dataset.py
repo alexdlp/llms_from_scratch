@@ -151,6 +151,7 @@ class BilingualDatasetBuilder:
         tokenizer.train_from_iterator(
             self._get_sentences(dataset, language),
             trainer,
+            length=len(dataset),
         )
 
         # At this point the vocabulary and its token-to-ID mapping are fixed.
