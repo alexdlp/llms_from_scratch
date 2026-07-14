@@ -22,6 +22,13 @@ class TransformerPipeline(BasePipeline):
     once the model's forward path has been reviewed.
     """
 
+    def setup(self) -> None:
+        """Set up training and expose the Transformer's staged forward methods."""
+        super().setup()
+        self.model.mark_forward_method("encode")
+        self.model.mark_forward_method("decode")
+        self.model.mark_forward_method("project")
+
     def load_data(self) -> tuple[DataLoader, DataLoader]:
         """Build the bilingual datasets and their train/validation loaders."""
  
