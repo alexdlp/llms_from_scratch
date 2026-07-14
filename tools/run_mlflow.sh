@@ -15,18 +15,21 @@ if [ -f "$ENV_FILE" ]; then
   set +a
   echo "Loaded environment variables from $ENV_FILE"
 else
-  echo "Warning: .env not found. Environment variables must already be defined."
+  echo "Warning: .env not found. Using local MLflow defaults."
 fi
 
-# --- Conda environment path ---
-CONDA_ENV_PATH="$PROJECT_DIR/.venv"
+# --- Local defaults ---
+MLFLOW_HOST="${MLFLOW_HOST:-127.0.0.1}"
+MLFLOW_PORT="${MLFLOW_PORT:-5001}"
+MLFLOW_TRACKING_URI="${MLFLOW_TRACKING_URI:-http://${MLFLOW_HOST}:${MLFLOW_PORT}}"
+MLFLOW_BIN="$PROJECT_DIR/.venv/bin/mlflow"
 
 # --- Backend store URI (folder artifacts) ---
 BACKEND_URI="file:${PROJECT_DIR}/artifacts"
 
-# --- Check if required variables exist ---
-if [ -z "$MLFLOW_HOST" ] || [ -z "$MLFLOW_PORT" ] || [ -z "$MLFLOW_TRACKING_URI" ]; then
-  echo "Error: MLFLOW_HOST, MLFLOW_PORT, or MLFLOW_TRACKING_URI not set in environment."
+# --- Check local MLflow installation ---
+if [ ! -x "$MLFLOW_BIN" ]; then
+  echo "Error: MLflow executable not found at $MLFLOW_BIN. Run 'uv sync' first."
   exit 1
 fi
 
@@ -41,15 +44,13 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   echo "MLflow UI is already running in tmux session '$SESSION_NAME'."
 else
   echo "Starting MLflow UI on $MLFLOW_TRACKING_URI"
-  tmux new-session -d -s "$SESSION_NAME" "bash -lc '
+  tmux new-session -d -s "$SESSION_NAME" "
     cd \"$PROJECT_DIR\" &&
-    source \"\$(conda info --base)/etc/profile.d/conda.sh\" &&
-    conda activate \"$CONDA_ENV_PATH\" &&
-    mlflow ui \
+    exec \"$MLFLOW_BIN\" ui \
       --backend-store-uri \"$BACKEND_URI\" \
       --host \"$MLFLOW_HOST\" \
       --port \"$MLFLOW_PORT\"
-  '"
+  "
   echo "Access MLflow at: $MLFLOW_TRACKING_URI"
   echo "Attach to session: tmux attach -t $SESSION_NAME"
 fi
