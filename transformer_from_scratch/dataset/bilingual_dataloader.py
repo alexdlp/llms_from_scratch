@@ -1,8 +1,8 @@
-from typing import Sequence
+from collections.abc import Iterable, Sequence
 
 import torch
 from tokenizers import Tokenizer
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .bilingual_common import (
     EOS_TOKEN,
@@ -220,6 +220,8 @@ class BilingualDataLoader(DataLoader[BilingualSample]):
         dataset: BilingualDataset,
         batch_size: int = 32,
         shuffle: bool = True,
+        sampler: Sampler | Iterable | None = None,
+        batch_sampler: Sampler[list] | Iterable[list] | None = None,
         num_workers: int = 4,
         pin_memory: bool = False,
         persistent_workers: bool = False,
@@ -229,6 +231,8 @@ class BilingualDataLoader(DataLoader[BilingualSample]):
             dataset=dataset,
             batch_size=batch_size,
             shuffle=shuffle,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
