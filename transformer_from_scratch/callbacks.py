@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Protocol
+from typing import cast, Dict, Optional, Protocol
 
 import torch
 import mlflow
 from pathlib import Path
+from tokenizers import Tokenizer
+from torch.utils.data import DataLoader
+
+from .dataset.bilingual_common import EOS_TOKEN, SOS_TOKEN
+from .decoding import GreedyDecodingModel, greedy_decode
 from .logger import logger
 
 
@@ -250,4 +255,104 @@ class EarlyStopping(MetricCallback):
             logger.info(
                 f"[EarlyStopping] Stopping at epoch {epoch+1}: "
                 f"no improvement on {self.monitor}"
+            )
+
+
+class TranslationExamplesCallback(Callback):
+    """Generate and log a small set of validation translations each epoch.
+
+    Args:
+        validation_dataloader: Loader that provides prepared bilingual samples.
+        target_tokenizer: Tokenizer used to decode the generated target IDs.
+        maximum_length: Maximum generated sequence length, including ``[SOS]``.
+        num_examples: Number of translations logged after each epoch.
+    """
+
+    def __init__(
+        self,
+        validation_dataloader: DataLoader,
+        target_tokenizer: Tokenizer,
+        maximum_length: int,
+        num_examples: int = 2,
+    ) -> None:
+        if num_examples < 1:
+            raise ValueError("num_examples must be at least 1.")
+
+        self.validation_dataloader = validation_dataloader
+        self.target_tokenizer = target_tokenizer
+        self.maximum_length = maximum_length
+        self.num_examples = num_examples
+
+        self.target_sos_id = target_tokenizer.token_to_id(SOS_TOKEN)
+        self.target_eos_id = target_tokenizer.token_to_id(EOS_TOKEN)
+
+        if self.target_sos_id is None or self.target_eos_id is None:
+            raise ValueError("The target tokenizer must contain [SOS] and [EOS].")
+
+    @torch.no_grad()
+    def on_epoch_end(
+        self,
+        pipeline: CallbackPipeline,
+        epoch: int,
+        logs: Dict[str, float],
+    ) -> None:
+        """Generate examples and store them as an MLflow table."""
+        model = cast(GreedyDecodingModel, pipeline.model)
+        pipeline.model.eval()
+
+        examples = {
+            "source": [],
+            "target": [],
+            "prediction": [],
+        }
+
+        for batch in self.validation_dataloader:
+            source_batch = batch["source_token_ids"].to(pipeline.device)
+            source_mask_batch = batch["source_padding_mask"].to(
+                pipeline.device
+            )
+
+            for sample_index in range(source_batch.size(0)):
+                predicted_token_ids = greedy_decode(
+                    model=model,
+                    source_token_ids=source_batch[
+                        sample_index : sample_index + 1
+                    ],
+                    source_padding_mask=source_mask_batch[
+                        sample_index : sample_index + 1
+                    ],
+                    target_sos_id=self.target_sos_id,
+                    target_eos_id=self.target_eos_id,
+                    maximum_length=self.maximum_length,
+                )
+
+                source_text = batch["source_text"][sample_index]
+                target_text = batch["target_text"][sample_index]
+                prediction = self.target_tokenizer.decode(
+                    predicted_token_ids.detach().cpu().tolist(),
+                    skip_special_tokens=True,
+                )
+
+                examples["source"].append(source_text)
+                examples["target"].append(target_text)
+                examples["prediction"].append(prediction)
+
+                logger.info(
+                    "[Translation example] "
+                    f"source={source_text!r} target={target_text!r} "
+                    f"prediction={prediction!r}"
+                )
+
+                if len(examples["source"]) == self.num_examples:
+                    break
+
+            if len(examples["source"]) == self.num_examples:
+                break
+
+        if mlflow.active_run():
+            mlflow.log_table(
+                data=examples,
+                artifact_file=(
+                    f"translation_examples/epoch_{epoch + 1}.json"
+                ),
             )

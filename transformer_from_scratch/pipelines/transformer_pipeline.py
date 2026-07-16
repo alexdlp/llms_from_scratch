@@ -6,7 +6,12 @@ from torch.utils.data import DataLoader
 
 from .. import register_pipeline
 from .base_pipeline import BasePipeline
-from ..callbacks import Callback, EarlyStopping, ModelCheckpoint
+from ..callbacks import (
+    Callback,
+    EarlyStopping,
+    ModelCheckpoint,
+    TranslationExamplesCallback,
+)
 from ..dataset.bilingual_dataloader import BilingualDataLoader, PAD_TOKEN
 from ..dataset.bilingual_dataset import BilingualDatasetBuilder
 from ..model import Transformer, build_transformer
@@ -128,5 +133,11 @@ class TransformerPipeline(BasePipeline):
 
         model_checkpoint = ModelCheckpoint(**self.cfg.callbacks.model_checkpoint)
         early_stopping = EarlyStopping(**self.cfg.callbacks.early_stopping)
+        
+        translation_examples = TranslationExamplesCallback(
+            validation_dataloader=self.val_loader,
+            target_tokenizer=self.target_tokenizer,
+            **self.cfg.callbacks.translation_examples,
+        )
 
-        return [model_checkpoint, early_stopping]
+        return [model_checkpoint, early_stopping, translation_examples]

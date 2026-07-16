@@ -49,6 +49,10 @@ training:
 
 callbacks:
 
+  translation_examples:
+    maximum_length: ${data.dataset.sequence_length}
+    num_examples: 2
+
   early_stopping:
     patience: 10 #200 # 30-50 para el latent
     monitor: val_loss
