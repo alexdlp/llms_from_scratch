@@ -7,10 +7,12 @@ from torch.utils.data import DataLoader
 from .. import register_pipeline
 from .base_pipeline import BasePipeline
 from ..callbacks import (
+    AttentionVisualizationCallback,
     Callback,
     EarlyStopping,
     ModelCheckpoint,
     TranslationExamplesCallback,
+    TranslationMetricsCallback,
 )
 from ..dataset.bilingual_dataloader import BilingualDataLoader, PAD_TOKEN
 from ..dataset.bilingual_dataset import BilingualDatasetBuilder
@@ -139,5 +141,22 @@ class TransformerPipeline(BasePipeline):
             target_tokenizer=self.target_tokenizer,
             **self.cfg.callbacks.translation_examples,
         )
+        translation_metrics = TranslationMetricsCallback(
+            validation_dataloader=self.val_loader,
+            target_tokenizer=self.target_tokenizer,
+            **self.cfg.callbacks.translation_metrics,
+        )
+        attention_visualization = AttentionVisualizationCallback(
+            validation_dataloader=self.val_loader,
+            source_tokenizer=self.source_tokenizer,
+            target_tokenizer=self.target_tokenizer,
+            **self.cfg.callbacks.attention_visualization,
+        )
 
-        return [model_checkpoint, early_stopping, translation_examples]
+        return [
+            model_checkpoint,
+            early_stopping,
+            translation_examples,
+            translation_metrics,
+            attention_visualization,
+        ]
