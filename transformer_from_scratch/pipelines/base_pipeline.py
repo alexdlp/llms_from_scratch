@@ -36,6 +36,7 @@ class BasePipeline(ABC):
             accelerator=self.device.type,
             devices=fabric_devices,
             strategy="auto",
+            precision=cfg.training.precision,
         )
 
         # To be defined by subclasses
